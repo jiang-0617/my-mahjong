@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <title>台灣麻將 - Python 終極全視角連線桌</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <style>
+        body { background-color: #1a252f; color: #fff; font-family: sans-serif; text-align: center; padding: 10px; margin: 0; }
+        .table { background-color: #1e824c; border: 8px solid #145a32; border-radius: 12px; padding: 15px; max-width: 950px; margin: 10px auto; box-shadow: 0 8px 20px rgba(0,0,0,0.5); }
+        
+        /* 頂部全場看板 */
+        .opponents-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 15px; }
+        .player-card { background: rgba(0,0,0,0.4); border: 1px solid #2ecc71; border-radius: 8px; padding: 8px; font-size: 12px; text-align: left; }
+        .player-card.active { border: 2px solid #f1c40f; box-shadow: 0 0 10px #f1c40f; }
+        
+        /* 💡 升級：全場看板內的小麻將造型 */
+        .mini-tile { display: inline-block; padding: 1px 4px; background: white; color: black; border-radius: 2px; margin: 1px; font-weight: bold; font-size: 11px; border: 1px solid #ccc; box-shadow: 0 1px 0 #999; }
+        .mini-flower { background: #fffaf0; color: #d35400; border: 1px solid #d35400; }
+        .mini-meld { background: #fff2cc; color: #b71c1c; border: 1px solid #f39c12; }
+        .meld-group { display: inline-block; margin-right: 6px; background: rgba(255,255,255,0.05); padding: 1px 3px; border-radius: 3px; }
+
+        .tile-container { display: flex; flex-direction: row; flex-wrap: wrap; justify-content: center; gap: 6px; min-height: 50px; padding: 10px; background: rgba(0,0,0,0.2); border-radius: 5px; margin-top: 5px; }
+        
+        /* 我的區域大麻將外觀 */
+        .tile { width: 38px; height: 52px; background: white; color: black; font-weight: bold; border-radius: 4px; display: flex; flex-direction: column; align-items: center; justify-content: center; cursor: pointer; box-shadow: 0 3px 0 #ccc; border: 1px solid #aaa; user-select: none; font-size: 16px; position: relative; }
+        .tile:hover { transform: translateY(-3px); background: #f1c40f; }
+        
+        .tile.flower-tile { color: #d35400; background-color: #fffaf0; border-color: #d35400; cursor: default; }
+        .tile.flower-tile:hover { transform: none; background-color: #fffaf0; }
+        .tile.meld-tile { background-color: #fff2cc; border-color: #f39c12; color: #b71c1c; cursor: default; }
+        .tile.meld-tile:hover { transform: none; background-color: #fff2cc; }
+        .tile .action-label { font-size: 9px; color: #e67e22; font-weight: normal; margin-bottom: 2px; }
+
+        .public-zone { background: rgba(24, 114, 63, 0.6); border: 2px dashed #2ecc71; border-radius: 8px; margin: 12px 0; padding: 10px; text-align: left; }
+        .hand-wrapper { display: flex; flex-direction: row; justify-content: center; align-items: center; margin-top: 15px; }
+        .drawn-zone { margin-left: 15px; border-left: 2px dashed #f1c40f; padding-left: 10px; }
+        
+        .action-bar { background: rgba(241, 196, 15, 0.25); border: 2px dashed #f1c40f; padding: 10px; margin: 10px auto; border-radius: 8px; display: none; justify-content: center; gap: 10px; align-items: center; }
+        .btn { background: #3498db; color: white; border: none; padding: 8px 15px; border-radius: 4px; cursor: pointer; font-weight: bold; }
+        #log-box { color: #2ecc71; font-family: monospace; font-size: 12px; max-width: 950px; margin: 10px auto; text-align: left; background: #000; padding: 8px; border-radius: 5px; height: 80px; overflow-y: auto; }
+    </style>
+</head>
+<body>
+
+    <div class="table">
+        <div class="opponents-grid" id="opponents-grid"></div>
+
+        <div style="font-size: 14px; font-weight: bold; margin-bottom: 10px;">
+            🀄 剩餘牌數：<span id="deck-count" style="color:#f1c40f;">-</span> 張 | 
+            當前出牌者：<span id="current-player" style="color:#e74c3c;">等待開局</span>
+            <button class="btn" style="margin-left:20px; padding:4px 10px;" onclick="socket.emit('startGame')">人員到齊，直接開局</button>
+        </div>
+
+        <div id="action-bar" class="action-bar">
+            <span>牌友打出 <b id="intercept-card" style="color:#f1c40f;"></b>，你想：</span>
+            <div id="action-buttons" style="display:flex; gap:8px;"></div>
+            <button class="btn" style="background:#7f8c8d;" onclick="sendAction('過')">過</button>
+        </div>
+
+        <div class="public-zone">
+            <b style="color:#f1c40f; font-size: 14px;">我的公開區（花牌 🌸 與 吃碰副牌 🀄）：</b>
+            <div id="my-public-area" style="display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; min-height:55px; align-items:center;"></div>
+        </div>
+
+        <h4 style="margin:5px 0; text-align:left; color:#ccc;">河底（已打出的牌）：</h4>
+        <div id="river" class="tile-container"></div>
+
+        <h4 style="margin:15px 0 5px 0; text-align:left; color:#ccc;">我的手牌：</h4>
+        <div class="hand-wrapper">
+            <div id="hand" style="display:flex; gap:5px; flex-wrap:wrap;"></div>
+            <div id="drawn-tile-area" class="drawn-zone"></div>
+        </div>
+    </div>
+
+    <div id="log-box">> 網頁載入成功，連線中...</div>
+
+<script>
+    const socket = io("http://localhost:5000", { transports: ["websocket", "polling"] }); 
+    let myTurn = false;
+
+    socket.on('connect', () => { document.getElementById('log-box').innerHTML = "> ✅ 成功連線至 Python 麻將伺服器！"; });
+    socket.on('log', (msg) => { 
+        const box = document.getElementById('log-box');
+        box.innerHTML += `<br>> ${msg}`;
+        box.scrollTop = box.scrollHeight;
+    });
+
+    function sendAction(act) {
+        document.getElementById('action-bar').style.display = 'none';
+        socket.emit('playerAction', { action: act });
+    }
+
+    function discard(tileText, isDrawn) {
+        if (!myTurn) return alert("不是你的回合！");
+        socket.emit('discardTile', { tileText, isDrawn });
+    }
+
+    // 💡 輔助函式：用來將後端的吃碰字串轉化成多顆小牌子 HTML
+    function parseMeldsToTilesHTML(meldsArray) {
+        if (!meldsArray || meldsArray.length === 0) return '無';
+        return meldsArray.map(m => {
+            if (m.type === '碰') {
+                // 碰牌是三張一樣的，直接產生三顆小牌
+                return `<span class="meld-group"><span style="color:#e67e22;font-size:10px;">碰:</span><span class="mini-tile mini-meld">${m.tile}</span><span class="mini-tile mini-meld">${m.tile}</span><span class="mini-tile mini-meld">${m.tile}</span></span>`;
+            } else if (m.type === '吃') {
+                // 吃牌的字串如 "7條-8條-9條"，用破折號拆開成三顆小牌
+                const singleTiles = m.tile.split('-');
+                const tilesHTML = singleTiles.map(t => `<span class="mini-tile mini-meld">${t}</span>`).join('');
+                return `<span class="meld-group"><span style="color:#3498db;font-size:10px;">吃:</span>${tilesHTML}</span>`;
+            }
+            return '';
+        }).join(' ');
+    }
+
+    socket.on('gameState', (state) => {
+        myTurn = state.isMyTurn;
+        document.getElementById('deck-count').innerText = state.deckCount;
+        document.getElementById('current-player').innerText = myTurn ? "⭐ 輪到你了！請選一張牌打出" : state.currentTurnName;
+
+        // 1. 💥 終極升級：頂部全場狀態看板現在會直接顯示「實體小麻將牌組合」 💥
+        const grid = document.getElementById('opponents-grid');
+        grid.innerHTML = state.allPlayersPublic.map(p => `
+            <div class="player-card ${p.id === socket.id ? 'active' : ''}">
+                <b>${p.name} ${p.id === socket.id ? '(我)' : ''}</b><br>
+                花：${p.flowers.map(f => `<span class="mini-tile mini-flower">${f.val}</span>`).join('') || '無'}<br>
+                副：${parseMeldsToTilesHTML(p.melds)}
+            </div>
+        `).join('');
+
+        // 2. 我的公開亮牌區
+        const myPublic = document.getElementById('my-public-area');
+        myPublic.innerHTML = '';
+        
+        if (state.flowers) {
+            state.flowers.forEach(f => {
+                myPublic.innerHTML += `<div class="tile flower-tile"><span style="font-size:10px;opacity:0.7;">🌸</span>${f.val}</div>`;
+            });
+        }
+        
+        if (state.melds) {
+            state.melds.forEach(m => {
+                if (m.type === '吃') {
+                    myPublic.innerHTML += `<div class="tile meld-tile"><span class="action-label">吃</span><span style="font-size:11px;">${m.tile}</span></div>`;
+                } else {
+                    myPublic.innerHTML += `<div class="tile meld-tile"><span class="action-label">碰</span>${m.tile}</div>`;
+                }
+            });
+        }
+        
+        if (myPublic.innerHTML === '') {
+            myPublic.innerHTML = `<span style="color:#aaa; font-size:13px; font-style:italic;">目前沒有任何公開亮牌</span>`;
+        }
+
+        document.getElementById('river').innerHTML = state.river ? state.river.map(t => `<div class="tile" style="width:30px; height:42px; font-size:14px; cursor:default;">${t.text}</div>`).join('') : '';
+
+        const bar = document.getElementById('action-bar');
+        const btns = document.getElementById('action-buttons');
+        if (state.actionOptions && state.actionOptions.length > 0) {
+            document.getElementById('intercept-card').innerText = state.interceptTile;
+            btns.innerHTML = state.actionOptions.map(opt => `<button class="btn" style="background:#e67e22;" onclick="sendAction('${opt}')">${opt}</button>`).join('');
+            bar.style.display = 'flex';
+        } else { bar.style.display = 'none'; }
+
+        const hDiv = document.getElementById('hand');
+        hDiv.innerHTML = state.hand ? state.hand.map(t => `<div class="tile" onclick="discard('${t.text}', false)">${t.text}</div>`).join('') : '';
+        
+        const dDiv = document.getElementById('drawn-tile-area');
+        dDiv.innerHTML = state.drawnTile ? `<div class="tile" style="border:2px solid #f1c40f;" onclick="discard('${state.drawnTile.text}', true)">${state.drawnTile.text}</div>` : '';
+    });
+
+    socket.on('updatePlayers', (players) => {
+        const box = document.getElementById('log-box');
+        box.innerHTML += `<br>> 目前在線人數：${players.length} 人`;
+    });
+</script>
+</body>
+</html>
